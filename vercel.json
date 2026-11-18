@@ -1,0 +1,10 @@
+{
+  "rewrites": [
+    { "source": "/scenarios", "destination": "/index.html" },
+    { "source": "/scenarios/", "destination": "/index.html" }
+  ],
+  "headers": [
+    { "source": "/scenarios", "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }] },
+    { "source": "/scenarios/", "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }] }
+  ]
+}

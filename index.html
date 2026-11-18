@@ -942,7 +942,13 @@ var CONTENT_URL = SUPABASE_URL + '/functions/v1/content';
 var AUTH_URL = 'https://yowvtdbqacltmilxkfsq.supabase.co';
 var AUTH_KEY = 'sb_publishable_pD2ZF-OmCU5Ft1XPaslOOg_jnogHTWX';  // public browser key of the shared login
 var LOGIN_URL = 'https://anmolshrivastava.in/login';
-var PLAYBOOK_PATH = '/cos-playbook';  // where the shared login sends people back to after signing in
+// Two addresses, one file:
+//   /cos-playbook           public landing page (anyone)
+//   /cos-playbook/scenarios the playbook itself (signed-in only; others are sent to the login first)
+var HOME_URL = 'https://anmolshrivastava.in/cos-playbook';
+var PLAYBOOK_PATH = '/cos-playbook/scenarios';  // where the shared login sends people back to after signing in
+var PLAYBOOK_URL = 'https://anmolshrivastava.in' + PLAYBOOK_PATH;
+var ON_PLAYBOOK = /\/scenarios\/?$/.test(location.pathname);  // which of the two screens this address is
 var SEARCH_URL = SUPABASE_URL + '/functions/v1/search';
 
 // ---------------------------------------------------------------------------
@@ -962,7 +968,11 @@ function storeSession(v) {
 }
 function storedSession() { try { return toSession(JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')); } catch (e) { return null; } }
 // Send people to the shared login; after signing in (or signing up) it brings them back into the playbook.
-function goToLogin() { location.href = LOGIN_URL + '?next=' + encodeURIComponent(PLAYBOOK_PATH); }
+// replace = true when leaving the locked playbook address, so Back doesn't return to it.
+function goToLogin(replace) {
+  var to = LOGIN_URL + '?next=' + encodeURIComponent(PLAYBOOK_PATH);
+  if (replace) location.replace(to); else location.href = to;
+}
 function authCall(path, body, token, method) {
   var headers = { 'Content-Type': 'application/json', apikey: AUTH_KEY };
   if (token) headers.Authorization = 'Bearer ' + token;
@@ -1084,17 +1094,22 @@ class Component extends DCLogic {
   initAuth() {
     var self = this;
     var stored = storedSession();
-    if (stored && stored.refresh_token) {
-      this.setState({ page: 'playbook' });  // signed in (e.g. just back from the shared login): open the playbook
+    var signedIn = !!(stored && stored.refresh_token);
+    if (ON_PLAYBOOK && !signedIn) { goToLogin(true); return; }  // playbook address, not signed in: log in first
+    if (signedIn) {
       if ((stored.expires_at || 0) - Date.now() / 1000 > 60) this.setSession(stored);
-      else { this.setState({ session: stored }); this.refreshSession().then(function (n) { if (n) self.loadContent(); }); }
+      else {
+        // Session has expired: renew it first; if that fails on the playbook address, go to the login.
+        this.setState({ session: stored });
+        this.refreshSession().then(function (n) { if (n) { if (ON_PLAYBOOK) self.loadContent(); } else if (ON_PLAYBOOK) goToLogin(true); });
+      }
     }
     // Logging in or out in another tab of the site updates this page too.
     window.addEventListener('storage', function (e) {
       if (e.key !== SESSION_KEY) return;
       var now = storedSession();
       if (!now && self.state.session) self.logout(true);
-      else if (now && !self.state.session) { self.setState({ page: 'playbook' }); self.setSession(now); }
+      else if (now && !self.state.session) self.setSession(now);
     });
   }
   setSession(s) {
@@ -1104,7 +1119,7 @@ class Component extends DCLogic {
     if (s) this._refreshT = setTimeout(function () { self.refreshSession(); }, Math.max(5, (s.expires_at - Date.now() / 1000) - 60) * 1000);
     var wasIn = !!this.state.session;
     this.setState({ session: s });
-    if (s && !wasIn && !DATA.length) this.loadContent();
+    if (s && !wasIn && !DATA.length && ON_PLAYBOOK) this.loadContent();  // content is only needed on the playbook address
   }
   refreshSession() {
     var self = this, cur = this.state.session;
@@ -1113,7 +1128,7 @@ class Component extends DCLogic {
     this._refreshing = authCall('/token?grant_type=refresh_token', { refresh_token: cur.refresh_token })
       .then(function (d) { var s = toSession(d); if (s && !s.user) s.user = cur.user; self.setSession(s); return s; })
       .catch(function (err) {
-        if (err && err.status >= 400 && err.status < 500) { self.setSession(null); return null; }
+        if (err && err.status >= 400 && err.status < 500) { self.setSession(null); if (ON_PLAYBOOK) goToLogin(true); return null; }
         clearTimeout(self._refreshT);
         self._refreshT = setTimeout(function () { self.refreshSession(); }, 30000);  // offline: try again shortly
         return cur;
@@ -1130,10 +1145,13 @@ class Component extends DCLogic {
   openAuth(view) { goToLogin(); }
   // Home page call to action: straight into the playbook when signed in, otherwise log in first.
   startPlaybook() {
-    if (this.state.session) { this.setState({ page: 'playbook' }); try { window.scrollTo(0, 0); } catch (e) {} return; }
+    if (this.state.session) { location.href = PLAYBOOK_URL; return; }  // signed in: straight to the playbook address
     goToLogin();
   }
-  goHome() { this.setState({ page: 'home', authView: null }); try { window.scrollTo(0, 0); } catch (e) {} }
+  goHome() {
+    if (ON_PLAYBOOK) { location.href = HOME_URL; return; }
+    try { window.scrollTo(0, 0); } catch (e) {}
+  }
   closeAuth() {
     var q = this.state.query;
     var into = !!this.state.session && (this.state.pendingPlaybook || this.state.page === 'playbook');
@@ -1198,17 +1216,17 @@ class Component extends DCLogic {
       .then(function () { self.setState({ authErr: '', authInfo: 'Confirmation email sent again to ' + email + '.' }); })
       .catch(function (err) { self.setState({ authErr: authMessage(err, 'resend').text, authInfo: '' }); });
   }
-  logout(already) {
+  logout(already, toLogin) {
     var s = this.state.session;
     if (s && !already) authCall('/logout', null, s.access_token).catch(function () {});
     this.setSession(null);
     DATA = [];  // the playbook content is for signed-in users only
     this.setState({ results: null, searching: false, page: 'home', contentState: 'idle', bucket: -1, open: -1, query: '' });
+    if (ON_PLAYBOOK) { if (toLogin) goToLogin(true); else location.replace(HOME_URL); }
   }
   // The account exists but belongs to a different application on the same Supabase project: no access here.
   notMember() {
-    this.logout();
-    goToLogin();
+    this.logout(false, true);
   }
   // After login: pull the live buckets, questions and answers from Supabase and keep them as this page's copy.
   // If the call fails (or takes over 8 seconds), the backup copy built into the page is shown instead.
@@ -1243,7 +1261,7 @@ class Component extends DCLogic {
           setTimeout(self._fit, 30);
         })
         .catch(function (err) {
-          if (err && err.loggedOut) { self.logout(); return; }
+          if (err && err.loggedOut) { self.logout(true, true); return; }  // session no longer valid: log in again
           if (err && err.notMember) { clearTimeout(self._contentT); self.notMember(); return; }
           self.useBackup();
         });
@@ -1426,9 +1444,9 @@ class Component extends DCLogic {
       contentDown: s.contentState === 'down',
       retryContent: function () { self.setState({ contentState: 'loading' }); self.loadContent(); },
       loggedIn: !!s.session, loggedOut: !s.session,
-      showPlaybook: !!s.session && s.page === 'playbook',
-      showHome: !(s.session && s.page === 'playbook'),
-      showOpenBtn: !!s.session && s.page !== 'playbook',
+      showPlaybook: ON_PLAYBOOK && !!s.session,
+      showHome: !ON_PLAYBOOK,
+      showOpenBtn: !!s.session && !ON_PLAYBOOK,
       startPlaybook: function () { self.startPlaybook(); },
       goHome: function (e) { if (e && e.preventDefault) e.preventDefault(); self.goHome(); },
       userName: s.session && s.session.user ? (s.session.user.name || s.session.user.email) : '',
